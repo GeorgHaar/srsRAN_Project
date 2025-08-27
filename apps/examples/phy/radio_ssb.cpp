@@ -703,24 +703,67 @@ int main(int argc, char** argv)
   std::unique_ptr<upper_phy_ssb_example> upper_phy     = upper_phy_ssb_example::create(upper_phy_sample_config);
   srsran_assert(upper_phy, "Failed to create upper physical layer.");
 
-  // Connect adapters.
+  // ================================================================================================
+  // SIGNAL FLOW ARCHITECTURE: Connect the signal processing chain
+  // ================================================================================================
+  //
+  // This section demonstrates the complete signal flow from upper PHY signal generation 
+  // to baseband transmission through the radio hardware:
+  //
+  // 1. Upper PHY (upper_phy) generates 5G signals (SSB, PDCCH, PDSCH) in resource grids
+  // 2. Resource Grid Gateway (rg_gateway_adapter) transfers resource grids to Lower PHY  
+  // 3. Lower PHY (lower_phy_instance) performs OFDM modulation to create baseband samples
+  // 4. Baseband Gateway interfaces with radio hardware (UHD/ZMQ) for transmission
+  // 5. Radio hardware (radio) transmits the baseband samples over the air
+  //
+  // Data Flow:
+  // Upper PHY → Resource Grid → Lower PHY → Baseband Samples → Radio Hardware → RF Signal
+  //
+  // Connect adapters to establish the signal processing pipeline:
+  
+  // Connect RX symbol processing chain (for uplink reception if enabled)
   rx_symbol_adapter.connect(&rx_symbol_handler);
+  
+  // Connect timing control: Upper PHY controls Lower PHY timing
   timing_adapter.connect(upper_phy.get());
+  
+  // **KEY CONNECTION**: Resource Grid Gateway - transfers frequency-domain symbols 
+  // from Upper PHY signal generation to Lower PHY OFDM modulation
   rg_gateway_adapter.connect(&lower_phy_instance->get_rg_handler());
+  
+  // Connect uplink symbol request handling
   phy_rx_symbol_req_adapter.connect(&lower_phy_instance->get_request_handler());
 
-  // Calculate starting time.
-  double                     delay_s      = 0.1;
+  // ================================================================================================
+  // TIMING SYNCHRONIZATION: Calculate precise transmission start time
+  // ================================================================================================
+  // 5G requires precise timing - calculate when to start transmission
+  double                     delay_s      = 0.1;  // Small delay for system startup
   baseband_gateway_timestamp current_time = radio->read_current_time();
   baseband_gateway_timestamp start_time = current_time + static_cast<uint64_t>(delay_s * radio_config.sampling_rate_hz);
 
-  // Start processing.
+  // ================================================================================================
+  // START SIGNAL PROCESSING CHAIN: Begin real-time operation
+  // ================================================================================================
+  // Start the signal processing chain in the correct order:
+  // 1. Radio hardware must be ready to transmit/receive
   radio->start(start_time);
+  
+  // 2. Lower PHY starts generating baseband samples and sending to radio
   lower_phy_instance->get_controller().start(start_time);
 
-  // Receive and transmit per block basis.
+  // ================================================================================================
+  // MAIN PROCESSING LOOP: TTI-based signal generation and transmission
+  // ================================================================================================
+  // Process signals on a TTI (Transmission Time Interval) basis
+  // Each iteration represents one slot (typically 0.5ms or 1ms depending on numerology)
   for (unsigned slot_count = 0; slot_count != duration_slots && !stop; ++slot_count) {
-    // Wait for PHY to detect a TTI boundary.
+    // Wait for PHY to detect a TTI boundary - this throttles the loop to real-time
+    // During this wait, the following happens asynchronously:
+    // 1. Upper PHY generates new resource grids with SSB/PDCCH/PDSCH signals
+    // 2. Lower PHY performs OFDM modulation on previous resource grids  
+    // 3. Baseband samples are transmitted through radio hardware
+    // 4. Any uplink signals are received and processed
     upper_phy->wait_tti_boundary();
   }
 

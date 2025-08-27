@@ -58,13 +58,32 @@ void ofdm_symbol_modulator_impl::modulate(span<cf_t>                  output,
                                           unsigned                    port_index,
                                           unsigned                    symbol_index)
 {
+  // ================================================================================================
+  // OFDM MODULATION: Convert frequency-domain symbols to time-domain baseband samples
+  // ================================================================================================
+  //
+  // This function implements the core OFDM modulation process that converts frequency-domain
+  // resource elements (from Upper PHY) into time-domain baseband samples (for transmission).
+  //
+  // OFDM Process:
+  // 1. Extract frequency-domain data from resource grid
+  // 2. Arrange data for IFFT (with DC subcarrier in center)
+  // 3. Perform IFFT to convert to time domain
+  // 4. Apply phase compensation and scaling
+  // 5. Add cyclic prefix for multipath protection
+  //
+  // Input:  Resource grid with frequency-domain symbols (QAM/PSK)
+  // Output: Time-domain baseband samples ready for transmission
+  //
+  
   // Calculate number of symbols per slot.
   unsigned nsymb = get_nsymb_per_slot(cp);
 
-  // Calculate cyclic prefix length.
+  // Calculate cyclic prefix length for this specific symbol
+  // (different symbols in a slot may have different CP lengths)
   unsigned cp_len = cp.get_length(symbol_index, scs).to_samples(sampling_rate_Hz);
 
-  // Make sure output buffer matches the symbol size.
+  // Validate output buffer size matches expected symbol size
   srsran_assert(output.size() == (cp_len + dft_size),
                 "The output buffer size ({}) does not match the symbol index {} size ({}+{}={}). SCS={}kHz.",
                 output.size(),
@@ -74,29 +93,51 @@ void ofdm_symbol_modulator_impl::modulate(span<cf_t>                  output,
                 cp_len + dft_size,
                 scs_to_khz(scs));
 
-  // Skip modulator if the grid is empty for the given port.
+  // Handle empty resource grid (no signal to transmit)
   if (grid.is_empty(port_index)) {
     srsvec::zero(output);
     return;
   }
 
-  // Prepare lower bound frequency domain data.
+  // ================================================================================================
+  // STEP 1: Extract frequency-domain data from resource grid
+  // ================================================================================================
+  // Resource grid contains frequency-domain symbols arranged by subcarrier
+  // OFDM requires DC subcarrier at center, so we split the data:
+  // - Lower half: negative frequencies (goes to end of IFFT input)
+  // - Upper half: positive frequencies (goes to beginning of IFFT input)
+  
+  // Extract lower bound frequency domain data (negative frequencies)
   grid.get(dft->get_input().last(rg_size / 2), port_index, symbol_index % nsymb, 0);
 
-  // Prepare upper bound frequency domain data.
+  // Extract upper bound frequency domain data (positive frequencies)  
   grid.get(dft->get_input().first(rg_size / 2), port_index, symbol_index % nsymb, rg_size / 2);
 
-  // Execute DFT.
+  // ================================================================================================
+  // STEP 2: Perform IFFT to convert frequency domain to time domain
+  // ================================================================================================
+  // IFFT converts frequency-domain subcarriers to time-domain samples
   span<const cf_t> dft_output = dft->run();
 
-  // Get phase correction (TS 138.211, Section 5.4)
+  // ================================================================================================ 
+  // STEP 3: Apply phase compensation and scaling
+  // ================================================================================================
+  // Phase compensation accounts for symbol timing (3GPP TS 138.211, Section 5.4)
   cf_t phase_compensation = phase_compensation_table.get_coefficient(symbol_index);
 
-  // Apply scaling and phase compensation.
+  // Apply both phase compensation and amplitude scaling to the time-domain samples
   srsvec::sc_prod(dft_output, phase_compensation * scale, output.last(dft_size));
 
-  // Copy cyclic prefix.
+  // ================================================================================================
+  // STEP 4: Add cyclic prefix for multipath protection  
+  // ================================================================================================
+  // Cyclic prefix copies the end of the symbol to the beginning
+  // This provides immunity to multipath propagation and maintains orthogonality
   srsvec::copy(output.first(cp_len), output.last(cp_len));
+  
+  // Final output: Complete OFDM symbol with cyclic prefix ready for transmission
+  // The baseband samples in 'output' are now ready to be sent to the radio hardware
+}
 }
 
 unsigned ofdm_slot_modulator_impl::get_slot_size(unsigned slot_index) const

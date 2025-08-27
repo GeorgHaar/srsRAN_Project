@@ -86,14 +86,40 @@ bool pdxch_processor_impl::process_symbol(baseband_gateway_buffer_writer&       
     return false;
   }
 
-  // Symbol index within the subframe.
+  // ================================================================================================
+  // SIGNAL MODULATION: Convert resource grid symbols to baseband samples
+  // ================================================================================================
+  //
+  // This is a critical step in the signal flow where frequency-domain resource elements
+  // (containing 5G signals like PDCCH, PDSCH, SSB) are converted to time-domain baseband
+  // samples that can be transmitted by radio hardware.
+  //
+  // Process:
+  // 1. Get the resource grid containing frequency-domain signals from Upper PHY
+  // 2. For each antenna port, call OFDM modulator to convert to time-domain
+  // 3. Store the resulting baseband samples in the output buffer
+  //
+  // The 'samples' buffer will contain the final baseband samples ready for transmission
+  //
+
+  // Calculate symbol index within the subframe (0-13 for normal CP, 0-11 for extended CP)
   unsigned symbol_index_subframe = context.symbol + context.slot.subframe_slot_index() * nof_symbols_per_slot;
 
-  // Modulate each of the ports.
+  // ================================================================================================
+  // MULTI-ANTENNA PROCESSING: Modulate each antenna port independently
+  // ================================================================================================
+  // For MIMO systems, each antenna port has its own resource grid and requires 
+  // separate OFDM modulation to generate independent baseband streams
   for (unsigned i_port = 0; i_port != nof_tx_ports; ++i_port) {
+    // **KEY FUNCTION CALL**: This performs the OFDM modulation
+    // - Input:  current_grid contains frequency-domain symbols (QAM/PSK modulated)
+    // - Output: samples.get_channel_buffer(i_port) receives time-domain baseband samples
+    // - Process: IFFT + cyclic prefix addition + phase compensation + scaling
     modulator->modulate(samples.get_channel_buffer(i_port), current_grid.get_reader(), i_port, symbol_index_subframe);
   }
 
+  // Return true to indicate successful processing
+  // The 'samples' buffer now contains baseband samples ready for transmission to radio hardware
   return true;
 }
 

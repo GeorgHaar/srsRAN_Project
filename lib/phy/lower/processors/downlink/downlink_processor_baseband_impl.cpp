@@ -229,54 +229,90 @@ bool downlink_processor_baseband_impl::process_new_symbol(baseband_gateway_buffe
                                                           slot_point                      slot,
                                                           unsigned                        i_symbol)
 {
-  // Process symbol by PDxCH processor.
-  pdxch_processor_baseband::symbol_context pdxch_context;
-  pdxch_context.slot   = slot;
-  pdxch_context.sector = sector_id;
-  pdxch_context.symbol = i_symbol;
+  // ================================================================================================
+  // BASEBAND SYMBOL PROCESSING: Final stage before radio transmission
+  // ================================================================================================
+  //
+  // This function represents the final processing stage in the srsRAN signal flow.
+  // It takes resource grids from Upper PHY, converts them to baseband samples via OFDM
+  // modulation, applies final RF processing, and prepares samples for radio transmission.
+  //
+  // Signal Flow within this function:
+  // 1. PDxCH processor performs OFDM modulation (frequency → time domain)
+  // 2. Apply carrier frequency offset (CFO) compensation
+  // 3. Apply amplitude/power control for transmission
+  // 4. Perform signal quality measurements
+  // 5. Buffer is now ready for baseband gateway → radio hardware
+  //
 
+  // ================================================================================================
+  // STEP 1: OFDM MODULATION - Convert resource grid to baseband samples
+  // ================================================================================================
+  // Create context for this symbol processing
+  pdxch_processor_baseband::symbol_context pdxch_context;
+  pdxch_context.slot   = slot;      // Which 5G slot (0.5ms or 1ms time period)
+  pdxch_context.sector = sector_id; // Which sector/cell
+  pdxch_context.symbol = i_symbol;  // Which OFDM symbol within the slot (0-13)
+
+  // **CORE OFDM MODULATION**: Convert frequency-domain resource elements to time-domain samples
+  // - Input:  Resource grids containing 5G signals (SSB, PDCCH, PDSCH, etc.)
+  // - Process: IFFT + cyclic prefix + phase compensation + scaling
+  // - Output: Time-domain baseband samples in 'buffer'
   bool processed = pdxch_proc_baseband.process_symbol(buffer, pdxch_context);
 
-  // Skip any post-processing if no signal is generated.
+  // Skip post-processing if no signal was generated for this symbol
   if (!processed) {
     return false;
   }
 
-  // Reset CFO processor initial phase at the first OFDM symbol.
+  // ================================================================================================
+  // STEP 2: RF SIGNAL CONDITIONING - Prepare baseband samples for transmission
+  // ================================================================================================
+
+  // Reset carrier frequency offset (CFO) processor phase at slot start
   if (i_symbol == 0) {
     cfo_processor.next_cfo_command();
   }
 
-  // Init signal measurements.
+  // Initialize signal quality measurement structures
   sample_statistics<float>   avg_power;
   sample_statistics<float>   peak_power;
   lower_phy_baseband_metrics metrics;
   uint64_t                   total_processed_samples = 0;
   uint64_t                   nof_clipped_samples     = 0;
 
-  // Post process modulated signal.
+  // ================================================================================================
+  // STEP 3: PER-ANTENNA PROCESSING - Apply final RF conditioning
+  // ================================================================================================
+  // Process each antenna port (MIMO systems have multiple ports)
   for (unsigned i_port = 0, i_port_end = buffer.get_nof_channels(); i_port != i_port_end; ++i_port) {
-    // Select channel buffer for the transmit port.
+    // Get the baseband sample buffer for this antenna port
     span<cf_t> channel_buffer = buffer.get_channel_buffer(i_port);
 
-    // Perform carrier frequency offset in place.
+    // **CARRIER FREQUENCY OFFSET (CFO) CORRECTION**
+    // Compensates for frequency differences between transmitter and receiver oscillators
     cfo_processor.process(channel_buffer);
 
-    // Process amplitude control.
+    // **AMPLITUDE CONTROL AND POWER SCALING** 
+    // Ensures proper transmission power levels and prevents amplifier saturation
     amplitude_control.process(channel_buffer, channel_buffer);
 
-    // Perform signal measurements.
-    avg_power.update(srsvec::average_power(channel_buffer));
-    peak_power.update(srsvec::max_abs_element(channel_buffer).second);
-    nof_clipped_samples += srsvec::count_if_part_abs_greater_than(channel_buffer, 0.95);
+    // **SIGNAL QUALITY MEASUREMENTS**
+    // Monitor signal characteristics for system optimization and debugging
+    avg_power.update(srsvec::average_power(channel_buffer));              // Average signal power
+    peak_power.update(srsvec::max_abs_element(channel_buffer).second);    // Peak signal amplitude
+    nof_clipped_samples += srsvec::count_if_part_abs_greater_than(channel_buffer, 0.95);  // Clipping detection
     total_processed_samples += channel_buffer.size();
   }
 
-  // Notify signal metrics.
+  // ================================================================================================
+  // STEP 4: METRICS REPORTING - Monitor signal quality
+  // ================================================================================================
+  // Report signal quality metrics for monitoring and optimization
   notifier->on_new_metrics(lower_phy_baseband_metrics{
-      .avg_power  = avg_power.get_mean(),
-      .peak_power = peak_power.get_mean(),
-      .clipping   = std::pair<uint64_t, uint64_t>{nof_clipped_samples, total_processed_samples}});
+      .avg_power  = avg_power.get_mean(),   // Average transmission power
+      .peak_power = peak_power.get_mean(),  // Peak transmission power  
+      .clipping   = std::pair<uint64_t, uint64_t>{nof_clipped_samples, total_processed_samples}});  // Clipping ratio
 
   // Advance CFO processor number of samples.
   cfo_processor.advance(buffer.get_nof_samples());
